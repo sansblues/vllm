@@ -1,10 +1,12 @@
 # Logprob Drift Evaluation
 
-Checks whether a candidate build changes a model's outputs by more than reruns of a
-reference build differ from each other. A kernel or cache change can shift outputs without
-moving an accuracy score: a rounding step in the wrong place, a stale cache slot, a kernel
-that truncates instead of rounding. This catches such changes from the model's logprobs,
-usually before any answer changes.
+Some changes to vLLM alter what a model computes without moving any accuracy score: a value
+rounded to bf16 too early, a stale KV block reused. This eval catches them from the model's
+logprobs, usually before any answer changes.
+
+No build reproduces itself exactly, so outputs can't simply be diffed. Instead the eval asks
+whether a candidate build differs from a reference build by more than reruns differ from
+each other.
 
 ## Usage
 
@@ -21,7 +23,8 @@ pytest -s -v tests/evals/logprob_drift/test_logprob_drift.py \
 ```
 
 Each run starts its own server with empty compile and autotune caches, and `--drift-out`
-must be a new directory. The comparison is also written to `result.json` there.
+must be a new directory. The comparison is also written to `result.json` there. A run takes
+a minute or two plus server startup with the small model.
 
 Or run the steps by hand, starting a new server with empty caches for each run. This also
 lets you alternate the two builds' runs:
@@ -38,11 +41,11 @@ python -m tests.evals.logprob_drift.logprob_drift_eval compare \
 `record --setup` takes JSON, such as the server's arguments, that `compare` then requires to
 match.
 
-A run takes a minute or two plus server startup with the small model. Here a PR that brings
-back the bug [#53877](https://github.com/vllm-project/vllm/pull/53877) fixed is replayed:
-the fix (56058fd5) is the reference and its parent (87b9b5b8) the candidate, with
-Qwen/Qwen3.5-0.8B and `--enforce-eager`, on an A40. The bug rounded beta to bf16 in the
-packed Gated DeltaNet decode kernel, so only decode sees it:
+For example, replaying the bug fixed in
+[#53877](https://github.com/vllm-project/vllm/pull/53877), with the fix (56058fd5) as the
+reference and its parent (87b9b5b8) as the candidate, on Qwen/Qwen3.5-0.8B with
+`--enforce-eager` on an A40. The bug rounded beta to bf16 in the packed Gated DeltaNet decode
+kernel, so only decode sees it:
 
 ```text
 First runs: probe KL 0.000183, same top token 99.54 %, 30.4 % of outputs differ
@@ -75,10 +78,10 @@ side lists and the other doesn't gets at most the other side's smallest listed p
 
 ## How it decides
 
-Even one build rarely reproduces its own outputs exactly: batches form differently from run
-to run, and a fresh server may compile and autotune its kernels differently. So each part
-is scored as the mean KL across builds over the mean KL between reruns: about 1× when
-nothing changed. The score is the largest of the three.
+Reruns differ because batches form differently each time and a fresh server may compile and
+autotune its kernels differently. So each part is scored as the mean KL across builds over
+the mean KL between reruns: about 1× when nothing changed. The score is the largest of the
+three.
 
 - Probes and decode take their noise from the reruns of both builds, since their reruns
   are often bit-identical.
@@ -86,12 +89,12 @@ nothing changed. The score is the largest of the three.
   at random makes the candidate's runs disagree with each other, and pooling would count that
   as noise.
 
-The verdict is a permutation test over the runs: if the builds are the same, any split of
-the runs into two equal groups is as likely as the real one. The candidate reads changed
-when its score is above what more than `alpha` of the splits reach, the score needed. So
-when nothing but the build differs between runs, the false alarm rate on unchanged code is
-at most `alpha`, with no thresholds to tune. This is why every run gets a fresh server and
-empty caches, and why both builds should run on one machine in one sitting.
+The verdict is a permutation test. If the builds are the same, the real split of the runs
+into reference and candidate is just one of many equally likely splits. The candidate reads
+changed when its score is above what more than `alpha` of all splits reach: the score
+needed. Unchanged code then reads changed at most `alpha` of the time, with no thresholds to
+tune. That holds only when nothing but the build differs between runs, hence a fresh server
+with empty caches for every run, and both builds on one machine in one sitting.
 
 The score needed also tells what a "same" verdict rules out: a change that would have
 scored above it.
@@ -122,6 +125,6 @@ kernel is checked only with `--enforce-eager`.
   statistics above tell how large it is.
 - A change that doesn't score above the score needed is missed: the verdict says how large
   that is. A change that only makes reruns disagree more is seen only in traffic.
-- A bug that strikes only some runs must strike enough of them to stand out: 3 of 5 runs
-  rarely do, 5 of 8 usually do. Record more runs when such a bug is the worry.
+- A bug that strikes only some runs must strike enough of them to stand out. Record more
+  runs when such a bug is the worry.
 - A build that tokenizes the data differently is refused, not compared.
