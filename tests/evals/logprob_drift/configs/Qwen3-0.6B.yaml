@@ -1,0 +1,4 @@
+model_name: "Qwen/Qwen3-0.6B"
+runs: 5
+# Fewer sequences than the 250 traffic prompts, so they queue and batches churn.
+server_args: "--max-model-len 2048 --max-num-seqs 32"
